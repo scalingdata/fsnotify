@@ -252,13 +252,13 @@ func (w *Watcher) readEvents() {
 			w.mu.Lock()
 			event.Name = w.paths[int(raw.Wd)]
 			w.mu.Unlock()
-			watchedName := event.Name
 			if nameLen > 0 {
 				// Point "bytes" at the first byte of the filename
 				bytes := (*[syscall.PathMax]byte)(unsafe.Pointer(&buf[offset+syscall.SizeofInotifyEvent]))
 				// The filename is padded with NUL bytes. TrimRight() gets rid of those.
 				event.Name += "/" + strings.TrimRight(string(bytes[0:nameLen]), "\000")
 			}
+			watchedName := event.Name
 
 			// Send the events that are not ignored on the events channel
 			if !event.ignoreLinux() {
