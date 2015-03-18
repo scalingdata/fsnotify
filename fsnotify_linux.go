@@ -240,6 +240,9 @@ func (w *Watcher) readEvents() {
 
 	go w.asyncSyscallRead(eventChan, errChan)
 
+ 	/* Listen for syscall reads or shutdown signals.
+	   If we're shutting down, don't block trying to serve
+	   the error and internal event queues */
 	for {
 		select {
 		case <-w.done:
