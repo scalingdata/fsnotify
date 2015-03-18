@@ -236,7 +236,7 @@ func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) 
 			errChan <- errors.New("inotify: short read in readEvents()")
 			continue
 		}
-		dataChan <- bufAndLen{buf[:],n}	
+		dataChan <- bufAndLen{buf[:],n}
 	}
 }
 
@@ -292,55 +292,55 @@ func (w *Watcher) shutdownAndDrainReader(eventChan chan bufAndLen, errChan chan 
 }
 
 func (w *Watcher) handleEvent(buf []byte, n int) bool {
-	var offset uint32 = 0
-	// We don't know how many events we just read into the buffer
-	// While the offset points to at least one whole event...
-	for offset <= uint32(n-syscall.SizeofInotifyEvent) {
-		// Point "raw" to the event in the buffer
-		raw := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[offset]))
-		event := new(FileEvent)
-		event.mask = uint32(raw.Mask)
-		event.cookie = uint32(raw.Cookie)
-		nameLen := uint32(raw.Len)
-		// If the event happened to the watched directory or the watched file, the kernel
-		// doesn't append the filename to the event, but we would like to always fill the
-		// the "Name" field with a valid filename. We retrieve the path of the watch from
-		// the "paths" map.
-		w.mu.Lock()
-		event.Name = w.paths[int(raw.Wd)]
-		w.mu.Unlock()
-		if nameLen > 0 {
-			// Point "bytes" at the first byte of the filename
-			bytes := (*[syscall.PathMax]byte)(unsafe.Pointer(&buf[offset+syscall.SizeofInotifyEvent]))
-			// The filename is padded with NUL bytes. TrimRight() gets rid of those.
-			event.Name += "/" + strings.TrimRight(string(bytes[0:nameLen]), "\000")
-		}
-		watchedName := event.Name
+		var offset uint32 = 0
+		// We don't know how many events we just read into the buffer
+		// While the offset points to at least one whole event...
+		for offset <= uint32(n-syscall.SizeofInotifyEvent) {
+			// Point "raw" to the event in the buffer
+			raw := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[offset]))
+			event := new(FileEvent)
+			event.mask = uint32(raw.Mask)
+			event.cookie = uint32(raw.Cookie)
+			nameLen := uint32(raw.Len)
+			// If the event happened to the watched directory or the watched file, the kernel
+			// doesn't append the filename to the event, but we would like to always fill the
+			// the "Name" field with a valid filename. We retrieve the path of the watch from
+			// the "paths" map.
+			w.mu.Lock()
+			event.Name = w.paths[int(raw.Wd)]
+			w.mu.Unlock()
+			if nameLen > 0 {
+				// Point "bytes" at the first byte of the filename
+				bytes := (*[syscall.PathMax]byte)(unsafe.Pointer(&buf[offset+syscall.SizeofInotifyEvent]))
+				// The filename is padded with NUL bytes. TrimRight() gets rid of those.
+				event.Name += "/" + strings.TrimRight(string(bytes[0:nameLen]), "\000")
+			}
+			watchedName := event.Name
 
-		// Send the events that are not ignored on the events channel
-		if !event.ignoreLinux() {
-			// Setup FSNotify flags (inherit from directory watch)
-			w.fsnmut.Lock()
-			if _, fsnFound := w.fsnFlags[event.Name]; !fsnFound {
-				if fsnFlags, watchFound := w.fsnFlags[watchedName]; watchFound {
-					w.fsnFlags[event.Name] = fsnFlags
-				} else {
-					w.fsnFlags[event.Name] = FSN_ALL
+			// Send the events that are not ignored on the events channel
+			if !event.ignoreLinux() {
+				// Setup FSNotify flags (inherit from directory watch)
+				w.fsnmut.Lock()
+				if _, fsnFound := w.fsnFlags[event.Name]; !fsnFound {
+					if fsnFlags, watchFound := w.fsnFlags[watchedName]; watchFound {
+						w.fsnFlags[event.Name] = fsnFlags
+					} else {
+						w.fsnFlags[event.Name] = FSN_ALL
+					}
+				}
+				w.fsnmut.Unlock()
+
+				select {
+				case <-w.done:
+					return false
+				case w.internalEvent <- event:
 				}
 			}
-			w.fsnmut.Unlock()
 
-			select {
-			case <-w.done:
-				return false
-			case w.internalEvent <- event:
-			}
+			// Move to the next event in the buffer
+			offset += syscall.SizeofInotifyEvent + nameLen
 		}
-
-		// Move to the next event in the buffer
-		offset += syscall.SizeofInotifyEvent + nameLen
-	}
-	return true
+		return true
 }
 
 // Certain types of events can be "ignored" and not sent over the Event
