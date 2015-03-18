@@ -120,7 +120,7 @@ func NewWatcher() (*Watcher, error) {
 		internalEvent: make(chan *FileEvent),
 		Event:         make(chan *FileEvent),
 		Error:         make(chan error),
-		done:          make(chan bool, 1),
+		done:          make(chan bool),
 	}
 
 	go w.readEvents()
@@ -143,7 +143,7 @@ func (w *Watcher) Close() error {
 	}
 
 	// Send "quit" message to the reader goroutine
-	w.done <- true
+	close(w.done)
 
 	return nil
 }
@@ -167,6 +167,7 @@ func (w *Watcher) addWatch(path string, flags uint32) error {
 		return errno
 	}
 
+	fmt.Printf("Added watch %v %v\n", w.fd, wd)
 	w.mu.Lock()
 	w.watches[path] = &watch{wd: uint32(wd), flags: flags}
 	w.paths[wd] = path
@@ -188,6 +189,7 @@ func (w *Watcher) removeWatch(path string) error {
 	if !ok {
 		return errors.New(fmt.Sprintf("can't remove non-existent inotify watch for: %s", path))
 	}
+	fmt.Printf("Removing watch for %v %v\n", w.fd, watch.wd)
 	success, errno := syscall.InotifyRmWatch(w.fd, watch.wd)
 	if success == -1 {
 		return os.NewSyscallError("inotify_rm_watch", errno)
@@ -196,89 +198,141 @@ func (w *Watcher) removeWatch(path string) error {
 	return nil
 }
 
-// readEvents reads from the inotify file descriptor, converts the
-// received events into Event objects and sends them via the Event channel
-func (w *Watcher) readEvents() {
+type bufAndLen struct {
+  buf []byte
+  len int
+}
+
+func (w *Watcher) asyncSysCall(dataChan chan bufAndLen, errChan chan error) {
 	var (
-		buf   [syscall.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
 		n     int                                     // Number of bytes read with read()
 		errno error                                   // Syscall errno
 	)
-
 	for {
-		// See if there is a message on the "done" channel
-		select {
-		case <-w.done:
-			syscall.Close(w.fd)
-			close(w.internalEvent)
-			close(w.Error)
-			return
-		default:
-		}
-
+		var buf [syscall.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
+		fmt.Printf("Read call\n")
 		n, errno = syscall.Read(w.fd, buf[:])
-
+		fmt.Printf("Read %v\n", n)		
 		// If EOF is received
 		if n == 0 {
-			syscall.Close(w.fd)
-			close(w.internalEvent)
-			close(w.Error)
+			close(dataChan)
+			close(errChan)
 			return
 		}
 
 		if n < 0 {
-			w.Error <- os.NewSyscallError("read", errno)
+			errChan <- os.NewSyscallError("read", errno)
 			continue
 		}
+
 		if n < syscall.SizeofInotifyEvent {
-			w.Error <- errors.New("inotify: short read in readEvents()")
+			errChan <- errors.New("inotify: short read in readEvents()")
 			continue
 		}
+		dataChan <- bufAndLen{buf[:],n}	
+	}
+}
 
-		var offset uint32 = 0
-		// We don't know how many events we just read into the buffer
-		// While the offset points to at least one whole event...
-		for offset <= uint32(n-syscall.SizeofInotifyEvent) {
-			// Point "raw" to the event in the buffer
-			raw := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[offset]))
-			event := new(FileEvent)
-			event.mask = uint32(raw.Mask)
-			event.cookie = uint32(raw.Cookie)
-			nameLen := uint32(raw.Len)
-			// If the event happened to the watched directory or the watched file, the kernel
-			// doesn't append the filename to the event, but we would like to always fill the
-			// the "Name" field with a valid filename. We retrieve the path of the watch from
-			// the "paths" map.
-			w.mu.Lock()
-			event.Name = w.paths[int(raw.Wd)]
-			w.mu.Unlock()
-			if nameLen > 0 {
-				// Point "bytes" at the first byte of the filename
-				bytes := (*[syscall.PathMax]byte)(unsafe.Pointer(&buf[offset+syscall.SizeofInotifyEvent]))
-				// The filename is padded with NUL bytes. TrimRight() gets rid of those.
-				event.Name += "/" + strings.TrimRight(string(bytes[0:nameLen]), "\000")
+// readEvents reads from the inotify file descriptor, converts the
+// received events into Event objects and sends them via the Event channel
+func (w *Watcher) readEvents() {
+	
+	eventChan := make(chan bufAndLen)
+	errChan := make(chan error)
+
+	go w.asyncSysCall(eventChan, errChan)
+
+	for {
+		fmt.Printf("Top of loop\n")
+		select {
+		case <-w.done:
+			fmt.Printf("Exit\n")
+			syscall.Close(w.fd)
+			close(w.internalEvent)
+			close(w.Error)
+			return	
+		case buf, ok := <- eventChan:
+			fmt.Printf("Event\n")
+			if !ok {
+				syscall.Close(w.fd)
+				close(w.internalEvent)
+				close(w.Error)
+				return
 			}
-			watchedName := event.Name
-
-			// Send the events that are not ignored on the events channel
-			if !event.ignoreLinux() {
-				// Setup FSNotify flags (inherit from directory watch)
-				w.fsnmut.Lock()
-				if _, fsnFound := w.fsnFlags[event.Name]; !fsnFound {
-					if fsnFlags, watchFound := w.fsnFlags[watchedName]; watchFound {
-						w.fsnFlags[event.Name] = fsnFlags
-					} else {
-						w.fsnFlags[event.Name] = FSN_ALL
-					}
-				}
-				w.fsnmut.Unlock()
-
-				w.internalEvent <- event
+			w.handleEvent(buf.buf, buf.len)	
+		case err, ok := <- errChan:
+			fmt.Printf("Error\n")
+			if !ok {
+				syscall.Close(w.fd)
+				close(w.internalEvent)
+				close(w.Error)
+				return
 			}
-
-			// Move to the next event in the buffer
-			offset += syscall.SizeofInotifyEvent + nameLen
+			select {
+			case <-w.done:
+				fmt.Printf("Exit\n")
+                        	syscall.Close(w.fd)
+                	        close(w.internalEvent)
+        	                close(w.Error)
+	                        return
+			case w.Error <- err:
+			}
 		}
+	}
+	fmt.Printf("Closing everything\n")
+}
+
+func (w *Watcher) handleEvent(buf []byte, n int) {
+	var offset uint32 = 0
+	// We don't know how many events we just read into the buffer
+	// While the offset points to at least one whole event...
+	for offset <= uint32(n-syscall.SizeofInotifyEvent) {
+		// Point "raw" to the event in the buffer
+		raw := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[offset]))
+		event := new(FileEvent)
+		event.mask = uint32(raw.Mask)
+		event.cookie = uint32(raw.Cookie)
+		nameLen := uint32(raw.Len)
+		// If the event happened to the watched directory or the watched file, the kernel
+		// doesn't append the filename to the event, but we would like to always fill the
+		// the "Name" field with a valid filename. We retrieve the path of the watch from
+		// the "paths" map.
+		w.mu.Lock()
+		event.Name = w.paths[int(raw.Wd)]
+		w.mu.Unlock()
+		if nameLen > 0 {
+			// Point "bytes" at the first byte of the filename
+			bytes := (*[syscall.PathMax]byte)(unsafe.Pointer(&buf[offset+syscall.SizeofInotifyEvent]))
+			// The filename is padded with NUL bytes. TrimRight() gets rid of those.
+			event.Name += "/" + strings.TrimRight(string(bytes[0:nameLen]), "\000")
+		}
+		watchedName := event.Name
+
+		// Send the events that are not ignored on the events channel
+		if !event.ignoreLinux() {
+			// Setup FSNotify flags (inherit from directory watch)
+			w.fsnmut.Lock()
+			if _, fsnFound := w.fsnFlags[event.Name]; !fsnFound {
+				if fsnFlags, watchFound := w.fsnFlags[watchedName]; watchFound {
+					w.fsnFlags[event.Name] = fsnFlags
+				} else {
+					w.fsnFlags[event.Name] = FSN_ALL
+				}
+			}
+			w.fsnmut.Unlock()
+			select {
+			case <-w.done:
+				fmt.Printf("Exit\n")
+                        	syscall.Close(w.fd)
+                	        close(w.internalEvent)
+        	                close(w.Error)
+	                        return
+			case w.internalEvent <- event:
+			}
+		}
+
+		// Move to the next event in the buffer
+		offset += syscall.SizeofInotifyEvent + nameLen
 	}
 }
 
