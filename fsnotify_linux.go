@@ -120,7 +120,7 @@ func NewWatcher() (*Watcher, error) {
 		internalEvent: make(chan *FileEvent),
 		Event:         make(chan *FileEvent),
 		Error:         make(chan error),
-		done:          make(chan bool, 1),
+		done:          make(chan bool),
 	}
 
 	go w.readEvents()
@@ -143,7 +143,7 @@ func (w *Watcher) Close() error {
 	}
 
 	// Send "quit" message to the reader goroutine
-	w.done <- true
+	close(w.done)
 
 	return nil
 }
@@ -196,45 +196,102 @@ func (w *Watcher) removeWatch(path string) error {
 	return nil
 }
 
-// readEvents reads from the inotify file descriptor, converts the
-// received events into Event objects and sends them via the Event channel
-func (w *Watcher) readEvents() {
+type bufAndLen struct {
+	buf []byte
+	len int
+}
+
+// Block on `syscall.Read` and return any errors or new messages on a channel
+// Calling in a goroutine allows us to listen for shutdown at the same time 
+func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) {
 	var (
-		buf   [syscall.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
 		n     int                                     // Number of bytes read with read()
 		errno error                                   // Syscall errno
 	)
 
 	for {
-		// See if there is a message on the "done" channel
-		select {
-		case <-w.done:
-			syscall.Close(w.fd)
-			close(w.internalEvent)
-			close(w.Error)
-			return
-		default:
-		}
 
+		var buf [syscall.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
 		n, errno = syscall.Read(w.fd, buf[:])
 
 		// If EOF is received
 		if n == 0 {
-			syscall.Close(w.fd)
-			close(w.internalEvent)
-			close(w.Error)
+			close(dataChan)
+			close(errChan)
 			return
 		}
 
-		if n < 0 {
-			w.Error <- os.NewSyscallError("read", errno)
-			continue
+		// If the FD has been closed we get -1
+		if n == -1 {
+			close(dataChan)
+			close(errChan)
+			return
 		}
-		if n < syscall.SizeofInotifyEvent {
-			w.Error <- errors.New("inotify: short read in readEvents()")
+		if n < -1 {
+			errChan <- os.NewSyscallError("read", errno)
 			continue
 		}
 
+		if n < syscall.SizeofInotifyEvent {
+			errChan <- errors.New("inotify: short read in readEvents()")
+			continue
+		}
+		dataChan <- bufAndLen{buf[:],n}
+	}
+}
+
+// readEvents reads from the inotify file descriptor, converts the
+// received events into Event objects and sends them via the Event channel
+func (w *Watcher) readEvents() {
+	eventChan := make(chan bufAndLen)
+	errChan := make(chan error)
+
+	go w.asyncSyscallRead(eventChan, errChan)
+	/* Listen for syscall reads or shutdown signals.
+	   If we're shutting down, don't block trying to serve
+	   the error and internal event queues */
+	for {
+		select {
+		case <-w.done:
+			w.shutdownAndDrainReader(eventChan, errChan)
+			return
+		case buf, ok := <- eventChan:
+			if !ok {
+				w.shutdownAndDrainReader(eventChan, errChan)
+				return
+			}
+
+			// `handleEvent` returns false if not all 
+			// messages could be sent before shutdown
+			if !w.handleEvent(buf.buf, buf.len) {
+				syscall.Close(w.fd)
+			}
+		case err, ok := <- errChan:
+			if !ok {
+				w.shutdownAndDrainReader(eventChan, errChan)
+				return
+			}
+			// If the Error channel blocks and we get a shutdown signal, give up
+			select {
+			case <-w.done:
+				w.shutdownAndDrainReader(eventChan, errChan)
+				return
+			case w.Error <- err:
+			}
+		}
+	}
+}
+
+/* Close the inotify FD and drain the events so the async reader returns */
+func (w *Watcher) shutdownAndDrainReader(eventChan chan bufAndLen, errChan chan error) {
+	syscall.Close(w.fd)
+	close(w.internalEvent)
+	close(w.Error)
+	<- eventChan
+	<- errChan
+}
+
+func (w *Watcher) handleEvent(buf []byte, n int) bool {
 		var offset uint32 = 0
 		// We don't know how many events we just read into the buffer
 		// While the offset points to at least one whole event...
@@ -273,13 +330,17 @@ func (w *Watcher) readEvents() {
 				}
 				w.fsnmut.Unlock()
 
-				w.internalEvent <- event
+				select {
+				case <-w.done:
+					return false
+				case w.internalEvent <- event:
+				}
 			}
 
 			// Move to the next event in the buffer
 			offset += syscall.SizeofInotifyEvent + nameLen
 		}
-	}
+		return true
 }
 
 // Certain types of events can be "ignored" and not sent over the Event
