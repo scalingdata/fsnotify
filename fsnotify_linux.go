@@ -210,8 +210,10 @@ func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) 
 	)
 
 	for {
+
 		var buf [syscall.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
 		n, errno = syscall.Read(w.fd, buf[:])
+
 		// If EOF is received
 		if n == 0 {
 			close(dataChan)
@@ -225,7 +227,6 @@ func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) 
 			close(errChan)
 			return
 		}
-
 		if n < -1 {
 			errChan <- os.NewSyscallError("read", errno)
 			continue
@@ -246,7 +247,6 @@ func (w *Watcher) readEvents() {
 	errChan := make(chan error)
 
 	go w.asyncSyscallRead(eventChan, errChan)
-
 	/* Listen for syscall reads or shutdown signals.
 	   If we're shutting down, don't block trying to serve
 	   the error and internal event queues */
@@ -260,6 +260,7 @@ func (w *Watcher) readEvents() {
 				w.shutdownAndDrainReader(eventChan, errChan)
 				return
 			}
+
 			// `handleEvent` returns false if not all 
 			// messages could be sent before shutdown
 			if !w.handleEvent(buf.buf, buf.len) {
