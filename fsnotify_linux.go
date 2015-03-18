@@ -245,43 +245,42 @@ func (w *Watcher) readEvents() {
 	   the error and internal event queues */
 	for {
 		select {
-		case <-w.done:
-			syscall.Close(w.fd)
-			close(w.internalEvent)
-			close(w.Error)
-			return	
+		case <-w.done:	
+			w.shutdownAndDrainReader(eventChan, errChan)
+			return
 		case buf, ok := <- eventChan:
 			if !ok {
-				syscall.Close(w.fd)
-				close(w.internalEvent)
-				close(w.Error)
+				w.shutdownAndDrainReader(eventChan, errChan)
 				return
 			}
 			// `handleEvent` returns false if not all 
 			// messages could be sent before shutdown
 			if !w.handleEvent(buf.buf, buf.len) {
 				syscall.Close(w.fd)
-				close(w.internalEvent)
-				close(w.Error)
-				return
 			}
 		case err, ok := <- errChan:
 			if !ok {
-				syscall.Close(w.fd)
-				close(w.internalEvent)
-				close(w.Error)
+				w.shutdownAndDrainReader(eventChan, errChan)
 				return
 			}
+			// If the Error channel blocks and we get a shutdown signal, give up
 			select {
 			case <-w.done:
-                        	syscall.Close(w.fd)
-                	        close(w.internalEvent)
-        	                close(w.Error)
-	                        return
+				w.shutdownAndDrainReader(eventChan, errChan)
+				return
 			case w.Error <- err:
 			}
 		}
 	}
+}
+
+/* Close the inotify FD and drain the events so the async reader returns */
+func (w *Watcher) shutdownAndDrainReader(eventChan chan bufAndLen, errChan chan error) {
+	syscall.Close(w.fd)
+	close(w.internalEvent)
+	close(w.Error)
+	<- eventChan
+	<- errChan
 }
 
 func (w *Watcher) handleEvent(buf []byte, n int) bool {
