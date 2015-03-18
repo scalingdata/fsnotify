@@ -167,7 +167,6 @@ func (w *Watcher) addWatch(path string, flags uint32) error {
 		return errno
 	}
 
-	fmt.Printf("Added watch %v %v\n", w.fd, wd)
 	w.mu.Lock()
 	w.watches[path] = &watch{wd: uint32(wd), flags: flags}
 	w.paths[wd] = path
@@ -189,7 +188,6 @@ func (w *Watcher) removeWatch(path string) error {
 	if !ok {
 		return errors.New(fmt.Sprintf("can't remove non-existent inotify watch for: %s", path))
 	}
-	fmt.Printf("Removing watch for %v %v\n", w.fd, watch.wd)
 	success, errno := syscall.InotifyRmWatch(w.fd, watch.wd)
 	if success == -1 {
 		return os.NewSyscallError("inotify_rm_watch", errno)
@@ -203,16 +201,16 @@ type bufAndLen struct {
   len int
 }
 
-func (w *Watcher) asyncSysCall(dataChan chan bufAndLen, errChan chan error) {
+// Block on `syscall.Read` and return any errors or new messages on a channel
+// Calling in a goroutine allows us to listen for shutdown at the same time 
+func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) {
 	var (
 		n     int                                     // Number of bytes read with read()
 		errno error                                   // Syscall errno
 	)
 	for {
 		var buf [syscall.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
-		fmt.Printf("Read call\n")
 		n, errno = syscall.Read(w.fd, buf[:])
-		fmt.Printf("Read %v\n", n)		
 		// If EOF is received
 		if n == 0 {
 			close(dataChan)
@@ -240,28 +238,31 @@ func (w *Watcher) readEvents() {
 	eventChan := make(chan bufAndLen)
 	errChan := make(chan error)
 
-	go w.asyncSysCall(eventChan, errChan)
+	go w.asyncSyscallRead(eventChan, errChan)
 
 	for {
-		fmt.Printf("Top of loop\n")
 		select {
 		case <-w.done:
-			fmt.Printf("Exit\n")
 			syscall.Close(w.fd)
 			close(w.internalEvent)
 			close(w.Error)
 			return	
 		case buf, ok := <- eventChan:
-			fmt.Printf("Event\n")
 			if !ok {
 				syscall.Close(w.fd)
 				close(w.internalEvent)
 				close(w.Error)
 				return
 			}
-			w.handleEvent(buf.buf, buf.len)	
+			// `handleEvent` returns false if not all 
+			// messages could be sent before shutdown
+			if !w.handleEvent(buf.buf, buf.len) {
+				syscall.Close(w.fd)
+				close(w.internalEvent)
+				close(w.Error)
+				return
+			}
 		case err, ok := <- errChan:
-			fmt.Printf("Error\n")
 			if !ok {
 				syscall.Close(w.fd)
 				close(w.internalEvent)
@@ -270,7 +271,6 @@ func (w *Watcher) readEvents() {
 			}
 			select {
 			case <-w.done:
-				fmt.Printf("Exit\n")
                         	syscall.Close(w.fd)
                 	        close(w.internalEvent)
         	                close(w.Error)
@@ -279,10 +279,9 @@ func (w *Watcher) readEvents() {
 			}
 		}
 	}
-	fmt.Printf("Closing everything\n")
 }
 
-func (w *Watcher) handleEvent(buf []byte, n int) {
+func (w *Watcher) handleEvent(buf []byte, n int) bool {
 	var offset uint32 = 0
 	// We don't know how many events we just read into the buffer
 	// While the offset points to at least one whole event...
@@ -322,11 +321,7 @@ func (w *Watcher) handleEvent(buf []byte, n int) {
 			w.fsnmut.Unlock()
 			select {
 			case <-w.done:
-				fmt.Printf("Exit\n")
-                        	syscall.Close(w.fd)
-                	        close(w.internalEvent)
-        	                close(w.Error)
-	                        return
+	                        return false
 			case w.internalEvent <- event:
 			}
 		}
@@ -334,6 +329,7 @@ func (w *Watcher) handleEvent(buf []byte, n int) {
 		// Move to the next event in the buffer
 		offset += syscall.SizeofInotifyEvent + nameLen
 	}
+	return true
 }
 
 // Certain types of events can be "ignored" and not sent over the Event
