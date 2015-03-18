@@ -330,7 +330,7 @@ func (w *Watcher) handleEvent(buf []byte, n int) bool {
 			w.fsnmut.Unlock()
 			select {
 			case <-w.done:
-	                        return false
+				return false
 			case w.internalEvent <- event:
 			}
 		}
