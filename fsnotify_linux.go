@@ -218,7 +218,14 @@ func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) 
 			return
 		}
 
-		if n < 0 {
+		// If the FD has been closed we get -1
+                if n == -1 {
+                        close(dataChan)
+                        close(errChan)
+                        return
+                }
+
+		if n < -1 {
 			errChan <- os.NewSyscallError("read", errno)
 			continue
 		}
