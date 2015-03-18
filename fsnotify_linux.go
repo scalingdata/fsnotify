@@ -208,6 +208,7 @@ func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) 
 		n     int                                     // Number of bytes read with read()
 		errno error                                   // Syscall errno
 	)
+
 	for {
 		var buf [syscall.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
 		n, errno = syscall.Read(w.fd, buf[:])
@@ -241,7 +242,6 @@ func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) 
 // readEvents reads from the inotify file descriptor, converts the
 // received events into Event objects and sends them via the Event channel
 func (w *Watcher) readEvents() {
-	
 	eventChan := make(chan bufAndLen)
 	errChan := make(chan error)
 
@@ -252,7 +252,7 @@ func (w *Watcher) readEvents() {
 	   the error and internal event queues */
 	for {
 		select {
-		case <-w.done:	
+		case <-w.done:
 			w.shutdownAndDrainReader(eventChan, errChan)
 			return
 		case buf, ok := <- eventChan:
@@ -328,6 +328,7 @@ func (w *Watcher) handleEvent(buf []byte, n int) bool {
 				}
 			}
 			w.fsnmut.Unlock()
+
 			select {
 			case <-w.done:
 				return false
