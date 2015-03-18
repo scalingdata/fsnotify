@@ -197,8 +197,8 @@ func (w *Watcher) removeWatch(path string) error {
 }
 
 type bufAndLen struct {
-  buf []byte
-  len int
+	buf []byte
+	len int
 }
 
 // Block on `syscall.Read` and return any errors or new messages on a channel
@@ -219,11 +219,11 @@ func (w *Watcher) asyncSyscallRead(dataChan chan bufAndLen, errChan chan error) 
 		}
 
 		// If the FD has been closed we get -1
-                if n == -1 {
-                        close(dataChan)
-                        close(errChan)
-                        return
-                }
+		if n == -1 {
+			close(dataChan)
+			close(errChan)
+			return
+		}
 
 		if n < -1 {
 			errChan <- os.NewSyscallError("read", errno)
@@ -247,7 +247,7 @@ func (w *Watcher) readEvents() {
 
 	go w.asyncSyscallRead(eventChan, errChan)
 
- 	/* Listen for syscall reads or shutdown signals.
+	/* Listen for syscall reads or shutdown signals.
 	   If we're shutting down, don't block trying to serve
 	   the error and internal event queues */
 	for {
