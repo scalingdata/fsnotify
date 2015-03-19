@@ -120,7 +120,7 @@ func NewWatcher() (*Watcher, error) {
 		internalEvent: make(chan *FileEvent),
 		Event:         make(chan *FileEvent),
 		Error:         make(chan error),
-		done:          make(chan bool, 1),
+		done:          make(chan bool),
 	}
 
 	go w.readEvents()
@@ -142,8 +142,10 @@ func (w *Watcher) Close() error {
 		w.RemoveWatch(path)
 	}
 
+	syscall.Close(w.fd)
+
 	// Send "quit" message to the reader goroutine
-	w.done <- true
+	close(w.done) 
 
 	return nil
 }
@@ -209,7 +211,6 @@ func (w *Watcher) readEvents() {
 		// See if there is a message on the "done" channel
 		select {
 		case <-w.done:
-			syscall.Close(w.fd)
 			close(w.internalEvent)
 			close(w.Error)
 			return
@@ -217,6 +218,13 @@ func (w *Watcher) readEvents() {
 		}
 
 		n, errno = syscall.Read(w.fd, buf[:])
+
+		// If the FD is closed
+                if n == -1 {
+                        close(w.internalEvent)
+                        close(w.Error)
+                        return
+                }
 
 		// If EOF is received
 		if n == 0 {
@@ -227,12 +235,20 @@ func (w *Watcher) readEvents() {
 		}
 
 		if n < 0 {
-			w.Error <- os.NewSyscallError("read", errno)
-			continue
+			select {
+			case w.Error <- os.NewSyscallError("read", errno):
+				continue
+			case <- w.done:
+				continue
+			}
 		}
 		if n < syscall.SizeofInotifyEvent {
-			w.Error <- errors.New("inotify: short read in readEvents()")
-			continue
+			select {
+			case w.Error <- errors.New("inotify: short read in readEvents()"):
+				continue
+			case <- w.done:
+				continue
+			}
 		}
 
 		var offset uint32 = 0
@@ -272,8 +288,11 @@ func (w *Watcher) readEvents() {
 					}
 				}
 				w.fsnmut.Unlock()
-
-				w.internalEvent <- event
+				select {
+				case w.internalEvent <- event:
+				case <- w.done:
+					break
+				}
 			}
 
 			// Move to the next event in the buffer
