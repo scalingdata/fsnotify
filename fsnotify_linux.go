@@ -220,7 +220,7 @@ func (w *Watcher) readEvents() {
 		n, errno = syscall.Read(w.fd, buf[:])
 
 		// If the FD is closed
-                if n == -1 {
+                if n == -1 && w.isClosed {
                         close(w.internalEvent)
                         close(w.Error)
                         return
