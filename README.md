@@ -1,92 +1,59 @@
 # File system notifications for Go
 
-[![GoDoc](https://godoc.org/github.com/howeyc/fsnotify?status.png)](http://godoc.org/github.com/howeyc/fsnotify)
+[![Coverage](http://gocover.io/_badge/github.com/go-fsnotify/fsnotify)](http://gocover.io/github.com/go-fsnotify/fsnotify) [![GoDoc](https://godoc.org/gopkg.in/fsnotify.v1?status.svg)](https://godoc.org/gopkg.in/fsnotify.v1)
+
+Go 1.3+ required.
 
 Cross platform: Windows, Linux, BSD and OS X.
 
-## Moving Notice
+|Adapter   |OS        |Status    |
+|----------|----------|----------|
+|inotify   |Linux, Android\*|Supported [![Build Status](https://travis-ci.org/go-fsnotify/fsnotify.svg?branch=master)](https://travis-ci.org/go-fsnotify/fsnotify)|
+|kqueue    |BSD, OS X, iOS\*|Supported [![Circle CI](https://circleci.com/gh/go-fsnotify/fsnotify.svg?style=svg)](https://circleci.com/gh/go-fsnotify/fsnotify)|
+|ReadDirectoryChangesW|Windows|Supported [![Build status](https://ci.appveyor.com/api/projects/status/ivwjubaih4r0udeh/branch/master?svg=true)](https://ci.appveyor.com/project/NathanYoungman/fsnotify/branch/master)|
+|FSEvents  |OS X          |[Planned](https://github.com/go-fsnotify/fsnotify/issues/11)|
+|FEN       |Solaris 11    |[Planned](https://github.com/go-fsnotify/fsnotify/issues/12)|
+|fanotify  |Linux 2.6.37+ | |
+|USN Journals |Windows    |[Maybe](https://github.com/go-fsnotify/fsnotify/issues/53)|
+|Polling   |*All*         |[Maybe](https://github.com/go-fsnotify/fsnotify/issues/9)|
 
-There is a fork being actively developed with a new API in preparation for the Go Standard Library:
-[github.com/go-fsnotify/fsnotify](https://github.com/go-fsnotify/fsnotify)
+\* Android and iOS are untested.
 
-## Example:
+Please see [the documentation](https://godoc.org/gopkg.in/fsnotify.v1) for usage. Consult the [Wiki](https://github.com/go-fsnotify/fsnotify/wiki) for the FAQ and further information.
+
+## API stability
+
+Two major versions of fsnotify exist. 
+
+**[fsnotify.v0](https://gopkg.in/fsnotify.v0)** is API-compatible with [howeyc/fsnotify](https://godoc.org/github.com/howeyc/fsnotify). Bugfixes *may* be backported, but I recommend upgrading to v1.
 
 ```go
-package main
-
-import (
-	"log"
-
-	"github.com/howeyc/fsnotify"
-)
-
-func main() {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	done := make(chan bool)
-
-	// Process events
-	go func() {
-		for {
-			select {
-			case ev := <-watcher.Event:
-				log.Println("event:", ev)
-			case err := <-watcher.Error:
-				log.Println("error:", err)
-			}
-		}
-	}()
-
-	err = watcher.Watch("testDir")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	<-done
-
-	/* ... do stuff ... */
-	watcher.Close()
-}
+import "gopkg.in/fsnotify.v0"
 ```
 
-For each event:
-* Name
-* IsCreate()
-* IsDelete()
-* IsModify()
-* IsRename()
+\* Refer to the package as fsnotify (without the .v0 suffix).
 
-## FAQ
+**[fsnotify.v1](https://gopkg.in/fsnotify.v1)** provides [a new API](https://godoc.org/gopkg.in/fsnotify.v1) based on [this design document](http://goo.gl/MrYxyA). You can import v1 with:
 
-**When a file is moved to another directory is it still being watched?**
+```go
+import "gopkg.in/fsnotify.v1"
+```
 
-No (it shouldn't be, unless you are watching where it was moved to).
+Further API changes are [planned](https://github.com/go-fsnotify/fsnotify/milestones), but a new major revision will be tagged, so you can depend on the v1 API.
 
-**When I watch a directory, are all subdirectories watched as well?**
+**Master** may have unreleased changes. Use it to test the very latest code or when [contributing][], but don't expect it to remain API-compatible:
 
-No, you must add watches for any directory you want to watch (a recursive watcher is in the works [#56][]).
+```go
+import "github.com/go-fsnotify/fsnotify"
+```
 
-**Do I have to watch the Error and Event channels in a separate goroutine?**
+## Contributing
 
-As of now, yes. Looking into making this single-thread friendly (see [#7][])
+Please refer to [CONTRIBUTING][] before opening an issue or pull request.
 
-**Why am I receiving multiple events for the same file on OS X?**
+## Example
 
-Spotlight indexing on OS X can result in multiple events (see [#62][]). A temporary workaround is to add your folder(s) to the *Spotlight Privacy settings* until we have a native FSEvents implementation (see [#54][]).
-
-**How many files can be watched at once?**
-
-There are OS-specific limits as to how many watches can be created:
-* Linux: /proc/sys/fs/inotify/max_user_watches contains the limit,
-reaching this limit results in a "no space left on device" error.
-* BSD / OSX: sysctl variables "kern.maxfiles" and "kern.maxfilesperproc", reaching these limits results in a "too many open files" error.
+See [example_test.go](https://github.com/go-fsnotify/fsnotify/blob/master/example_test.go).
 
 
-[#62]: https://github.com/howeyc/fsnotify/issues/62
-[#56]: https://github.com/howeyc/fsnotify/issues/56
-[#54]: https://github.com/howeyc/fsnotify/issues/54
-[#7]: https://github.com/howeyc/fsnotify/issues/7
-
+[contributing]: https://github.com/go-fsnotify/fsnotify/blob/master/CONTRIBUTING.md
