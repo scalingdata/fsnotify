@@ -104,6 +104,9 @@ type Watcher struct {
 	Event         chan *FileEvent   // Events are returned on this channel
 	done          chan bool         // Channel for sending a "quit message" to the reader goroutine
 	isClosed      bool              // Set to true when Close() is first called
+	fdClosed      bool              // Tracks whether or not the inotify file descriptor has been closed
+	fdLock        sync.Mutex        // Syncronize access to inotify file descriptor state
+  
 }
 
 // NewWatcher creates and returns a new inotify instance using inotify_init(2)
@@ -142,7 +145,10 @@ func (w *Watcher) Close() error {
 		w.RemoveWatch(path)
 	}
 
-	syscall.Close(w.fd)
+	err := w.closeFd()
+	if nil != err {
+		return err
+	}
 
 	// Send "quit" message to the reader goroutine
 	close(w.done) 
@@ -228,7 +234,10 @@ func (w *Watcher) readEvents() {
 
 		// If EOF is received
 		if n == 0 {
-			syscall.Close(w.fd)
+			err := w.closeFd()
+			if nil != err {
+				w.Error <- err
+			}
 			close(w.internalEvent)
 			close(w.Error)
 			return
@@ -299,6 +308,18 @@ func (w *Watcher) readEvents() {
 			offset += syscall.SizeofInotifyEvent + nameLen
 		}
 	}
+}
+
+func (w *Watcher) closeFd() error {
+	w.fdLock.Lock()
+	defer w.fdLock.Unlock()
+	if w.fdClosed {
+		return nil
+	}
+	err := syscall.Close(w.fd)
+	w.fd = -1
+	w.fdClosed = true
+	return err
 }
 
 // Certain types of events can be "ignored" and not sent over the Event
